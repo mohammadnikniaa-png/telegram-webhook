@@ -57,12 +57,52 @@ def flush_outbox():
         item = json.loads(line)
         send_message(item["chat_id"], item["text"])
 
+def _muse_authorized(handler):
+    # Muse reads/sends via the same secret the user set as WEBHOOK_SECRET_TOKEN.
+    # No token is in this file; it comes only from the host environment.
+    if not SECRET:
+        return False
+    return handler.headers.get("X-Muse-Secret") == SECRET
+
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+        if self.path.startswith("/inbox"):
+            if not _muse_authorized(self):
+                self.send_response(403); self.end_headers(); return
+            items = []
+            if os.path.exists(INBOX):
+                for line in open(INBOX, encoding="utf-8"):
+                    if line.strip():
+                        try:
+                            items.append(json.loads(line))
+                        except Exception:
+                            pass
+            data = json.dumps({"items": items}, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
+        self.send_response(501); self.end_headers(); return
     def do_POST(self):
-        if SECRET and self.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
-            self.send_response(403); self.end_headers(); return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        if self.path == "/outbox":
+            # Muse -> Telegram: Muse posts a reply, server sends it via the bot.
+            if not _muse_authorized(self):
+                self.send_response(403); self.end_headers(); return
+            try:
+                item = json.loads(body)
+                if item.get("chat_id") and item.get("text"):
+                    with open(OUTBOX, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    flush_outbox()
+            except Exception as e:
+                print("outbox error:", e, flush=True)
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+        if SECRET and self.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
+            self.send_response(403); self.end_headers(); return
         try:
             update = json.loads(body)
             msg = update.get("message") or {}
