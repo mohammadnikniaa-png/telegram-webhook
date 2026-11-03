@@ -68,6 +68,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+        if self.path == "/pending":
+            items = []
+            if os.path.exists(INBOX):
+                for line in open(INBOX, encoding="utf-8"):
+                    if line.strip():
+                        try:
+                            items.append(json.loads(line))
+                        except Exception:
+                            pass
+            last_at = items[-1].get("inbox_at") if items else None
+            data = json.dumps({"count": len(items), "last_at": last_at}, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
         if self.path.startswith("/inbox"):
             if not _muse_authorized(self):
                 self.send_response(403); self.end_headers(); return
@@ -84,21 +99,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers(); self.wfile.write(data); return
-        if self.path == "/pending":
-                      items = []
-                      if os.path.exists(INBOX):
-                                        for line in open(INBOX, encoding="utf-8"):
-                                                              if line.strip():
-                                                                                        try:
-                                                                                                                      items.append(json.loads(line))
-                                                                except Exception:
-                                                                                              pass
-                                                                              last_at = items[-1].get("inbox_at") if items else None
-                                                      data = json.dumps({"count": len(items), "last_at": last_at}, ensure_ascii=False).encode()
-                                    self.send_response(200)
-                      self.send_header("Content-Type", "application/json")
-                      self.send_header("Content-Length", str(len(data)))
-                      self.end_headers(); self.wfile.write(data); return
         self.send_response(501); self.end_headers(); return
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
