@@ -35,6 +35,8 @@ ENV = load_env()
 TOKEN = ENV.get("TELEGRAM_BOT_TOKEN", "")
 SECRET = ENV.get("WEBHOOK_SECRET_TOKEN", "")
 ALLOWED = set(x.strip() for x in ENV.get("ALLOWED_USER_IDS", "72551872").split(",") if x.strip())
+BALE_TOKEN = ENV.get("BALE_BOT_TOKEN", "")
+BALE_ALLOWED = set(x.strip() for x in ENV.get("BALE_ALLOWED_USER_IDS", "63920689").split(",") if x.strip())
 
 def send_message(chat_id, text):
     if not TOKEN:
@@ -42,6 +44,16 @@ def send_message(chat_id, text):
     for i in range(0, len(text), 4000):
         data = json.dumps({"chat_id": chat_id, "text": text[i:i+4000]}).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+
+def send_message_bale(chat_id, text):
+    if not BALE_TOKEN:
+        return
+    for i in range(0, len(text), 4000):
+        data = json.dumps({"chat_id": chat_id, "text": text[i:i+4000]}).encode()
+        req = urllib.request.Request(f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage",
             data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp.read()
@@ -55,7 +67,10 @@ def flush_outbox():
     open(OUTBOX, "w").close()
     for line in lines:
         item = json.loads(line)
-        send_message(item["chat_id"], item["text"])
+        if item.get("platform") == "bale":
+            send_message_bale(item["chat_id"], item["text"])
+        else:
+            send_message(item["chat_id"], item["text"])
 
 def _muse_authorized(handler):
     # Muse reads/sends via the same secret the user set as WEBHOOK_SECRET_TOKEN.
@@ -164,11 +179,41 @@ def _poll_loop():
             print("poll error:", e, flush=True)
         time.sleep(2)
 
+def _bale_poll_loop():
+    # Bale polling, same pattern as Telegram: every 2 seconds, whitelisted only.
+    offset = 0
+    while True:
+        try:
+            if BALE_TOKEN:
+                url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/getUpdates"
+                data = json.dumps({"offset": offset, "timeout": 0}).encode()
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
+                for update in result.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg = update.get("message") or {}
+                    user = msg.get("from", {})
+                    if str(user.get("id")) in BALE_ALLOWED and "text" in msg:
+                        with open(INBOX, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"platform": "bale", "chat_id": msg["chat"]["id"],
+                                "user_id": user.get("id"), "text": msg["text"],
+                                "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
+                        send_message_bale(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
+                        flush_outbox()
+        except Exception as e:
+            print("bale poll error:", e, flush=True)
+        time.sleep(2)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", os.environ.get("WEBHOOK_PORT", "8443")))
     if os.environ.get("TELEGRAM_POLLING") == "1":
         import threading
         threading.Thread(target=_poll_loop, daemon=True).start()
         print("Polling mode ON (n8n-style, every 2s)", flush=True)
+    if os.environ.get("BALE_POLLING") == "1":
+        import threading
+        threading.Thread(target=_bale_poll_loop, daemon=True).start()
+        print("Bale polling mode ON (every 2s)", flush=True)
     print(f"Webhook server listening on 0.0.0.0:{port}", flush=True)
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
