@@ -120,7 +120,40 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+def _poll_loop():
+    # n8n-style polling: every 2 seconds ask Telegram for new updates,
+    # only whitelisted user_id, write inbox, auto-reply, flush outbox.
+    # Runs only when TELEGRAM_POLLING=1 and no webhook is set.
+    import threading
+    offset = 0
+    while True:
+        try:
+            if TOKEN:
+                url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+                data = json.dumps({"offset": offset, "timeout": 0}).encode()
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
+                for update in result.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg = update.get("message") or {}
+                    user = msg.get("from", {})
+                    if str(user.get("id")) in ALLOWED and "text" in msg:
+                        with open(INBOX, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"platform": "telegram", "chat_id": msg["chat"]["id"],
+                                "user_id": user.get("id"), "text": msg["text"],
+                                "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
+                        send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
+                        flush_outbox()
+        except Exception as e:
+            print("poll error:", e, flush=True)
+        time.sleep(2)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", os.environ.get("WEBHOOK_PORT", "8443")))
+    if os.environ.get("TELEGRAM_POLLING") == "1":
+        import threading
+        threading.Thread(target=_poll_loop, daemon=True).start()
+        print("Polling mode ON (n8n-style, every 2s)", flush=True)
     print(f"Webhook server listening on 0.0.0.0:{port}", flush=True)
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
