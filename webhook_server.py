@@ -34,6 +34,11 @@ def load_env():
 ENV = load_env()
 TOKEN = ENV.get("TELEGRAM_BOT_TOKEN", "")
 SECRET = ENV.get("WEBHOOK_SECRET_TOKEN", "")
+# Obscure-path inbox read: set in host Settings only, never in code.
+# Serves the same inbox as /inbox, but at /inbox-<OBSCURE_PATH> with no
+# auth header. The path itself is the secret, so it must be long/random.
+# Polling, Bale, /inbox (secret) and /outbox are unchanged.
+OBSCURE_PATH = ENV.get("OBSCURE_PATH", "")
 ALLOWED = set(x.strip() for x in ENV.get("ALLOWED_USER_IDS", "72551872").split(",") if x.strip())
 BALE_TOKEN = ENV.get("BALE_BOT_TOKEN", "")
 BALE_ALLOWED = set(x.strip() for x in ENV.get("BALE_ALLOWED_USER_IDS", "63920689").split(",") if x.strip())
@@ -94,6 +99,20 @@ class Handler(BaseHTTPRequestHandler):
                             pass
             last_at = items[-1].get("inbox_at") if items else None
             data = json.dumps({"count": len(items), "last_at": last_at}, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
+        if OBSCURE_PATH and self.path == f"/inbox-{OBSCURE_PATH}":
+            items = []
+            if os.path.exists(INBOX):
+                for line in open(INBOX, encoding="utf-8"):
+                    if line.strip():
+                        try:
+                            items.append(json.loads(line))
+                        except Exception:
+                            pass
+            data = json.dumps({"items": items}, ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
