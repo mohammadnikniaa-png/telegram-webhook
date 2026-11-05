@@ -137,6 +137,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        # Obscure-path outbox: same OBSCURE_PATH as the inbox route, no secret
+        # header. Anyone with the full obscure URL could send as the bot, so
+        # keep that URL private. Secret /outbox below is unchanged.
+        if OBSCURE_PATH and self.path == f"/outbox-{OBSCURE_PATH}":
+            try:
+                item = json.loads(body)
+                if item.get("chat_id") and item.get("text"):
+                    with open(OUTBOX, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    flush_outbox()
+            except Exception as e:
+                print("obscure outbox error:", e, flush=True)
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
         if self.path == "/outbox":
             # Muse -> Telegram: Muse posts a reply, server sends it via the bot.
             if not _muse_authorized(self):
