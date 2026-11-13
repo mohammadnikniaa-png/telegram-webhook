@@ -67,6 +67,39 @@ def _load_widget_html():
 
 WIDGET_HTML = _load_widget_html()
 
+# --- Reply keyboard fallback (standard Telegram keyboards; Bale untouched) ---
+# The HTML widget is blocked by Telegram (sendWidget -> 400
+# INPUT_MEDIA_WIDGET_NOT_ALLOWED, even for a minimal widget), so a plain
+# reply keyboard is the fallback. A tap sends the button's text as a normal
+# message, which arrives in the inbox exactly like a typed command — no
+# intake change is needed. The keyboard is sent via the outbox with
+# kind="keyboard", or as a "keyboard" field alongside "text".
+QUICK_KEYBOARD = [["چک کن", "صورتحساب بگیر"], ["وضعیت سیستم", "تراکنش بفرست"]]
+KEYBOARD_TEXT = "دکمه‌های سریع 👇"
+
+def _keyboard_markup(rows):
+    """Build a reply_markup dict from button rows, or None if malformed."""
+    if not isinstance(rows, list):
+        return None
+    clean = []
+    for row in rows:
+        if not isinstance(row, list):
+            return None
+        clean_row = [b for b in row if isinstance(b, str) and b]
+        if not clean_row:
+            return None
+        clean.append(clean_row)
+    if not clean:
+        return None
+    return {"keyboard": clean, "resize_keyboard": True, "one_time_keyboard": False}
+
+def _outbox_accept(item):
+    """Accept an outbox item: it needs a chat_id and something to send
+    (text, a keyboard, or a widget/keyboard kind)."""
+    return bool(item.get("chat_id")) and bool(
+        item.get("text") or item.get("keyboard")
+        or item.get("kind") in ("widget", "keyboard"))
+
 def _tg_call(method, params):
     if not TOKEN:
         return {"ok": False, "description": "no token"}
@@ -145,15 +178,28 @@ def _handle_widget_query(query):
         "chat_data": json.dumps({"last": cmd, "at": time.strftime("%H:%M")}, ensure_ascii=False)})
     flush_outbox()
 
-def send_message(chat_id, text):
+def send_message(chat_id, text, reply_markup=None):
     if not TOKEN:
         return
-    for i in range(0, len(text), 4000):
-        data = json.dumps({"chat_id": chat_id, "text": text[i:i+4000]}).encode()
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    for idx, chunk in enumerate(chunks):
+        payload = {"chat_id": chat_id, "text": chunk}
+        if reply_markup is not None and idx == len(chunks) - 1:
+            payload["reply_markup"] = reply_markup
+        data = json.dumps(payload).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp.read()
+
+def send_keyboard(chat_id, rows=None, text=None):
+    """Send the quick-action reply keyboard (Telegram-only fallback)."""
+    markup = _keyboard_markup(rows if rows is not None else QUICK_KEYBOARD)
+    if markup is None:
+        print("keyboard: bad rows, not sent", flush=True)
+        return False
+    send_message(chat_id, text or KEYBOARD_TEXT, reply_markup=markup)
+    return True
 
 def send_message_bale(chat_id, text):
     if not BALE_TOKEN:
@@ -178,6 +224,12 @@ def flush_outbox():
             send_message_bale(item["chat_id"], item["text"])
         elif item.get("kind") == "widget":
             send_widget(item["chat_id"])
+        elif item.get("kind") == "keyboard":
+            send_keyboard(item["chat_id"], rows=item.get("keyboard"),
+                          text=item.get("text"))
+        elif item.get("keyboard"):
+            send_message(item["chat_id"], item["text"],
+                         reply_markup=_keyboard_markup(item["keyboard"]))
         else:
             send_message(item["chat_id"], item["text"])
 
@@ -247,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
         if OBSCURE_PATH and self.path == f"/outbox-{OBSCURE_PATH}":
             try:
                 item = json.loads(body)
-                if item.get("chat_id") and (item.get("text") or item.get("kind") == "widget"):
+                if _outbox_accept(item):
                     with open(OUTBOX, "a", encoding="utf-8") as f:
                         f.write(json.dumps(item, ensure_ascii=False) + "\n")
                     flush_outbox()
@@ -260,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(403); self.end_headers(); return
             try:
                 item = json.loads(body)
-                if item.get("chat_id") and (item.get("text") or item.get("kind") == "widget"):
+                if _outbox_accept(item):
                     with open(OUTBOX, "a", encoding="utf-8") as f:
                         f.write(json.dumps(item, ensure_ascii=False) + "\n")
                     flush_outbox()
