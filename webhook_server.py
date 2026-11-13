@@ -11,7 +11,7 @@ Telegram webhook server - lightweight, no LLM, no Muse tokens while idle.
   (TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET_TOKEN, ALLOWED_USER_IDS)
 - Verify Telegram's X-Telegram-Bot-Api-Secret-Token header if WEBHOOK_SECRET_TOKEN is set
 """
-import json, os, time, urllib.request
+import json, os, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +76,25 @@ def _tg_call(method, params):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # Telegram answers errors as HTTP 4xx with a JSON body:
+        # {"ok": false, "error_code": 400, "description": "Bad Request: ..."}.
+        # The description names the real problem (e.g. which field Telegram
+        # rejected); str(e) alone is only "HTTP Error 400: Bad Request" and
+        # drops it. Log the full body so the FadeHost logs show the cause.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        desc = ""
+        try:
+            desc = json.loads(body).get("description", "") if body else ""
+        except Exception:
+            pass
+        detail = desc or body[:500]
+        print(f"telegram {method} error: HTTP {e.code} {detail}", flush=True)
+        return {"ok": False, "error_code": e.code, "description": detail}
     except Exception as e:
         print(f"telegram {method} error:", e, flush=True)
         return {"ok": False, "description": str(e)}
@@ -97,7 +116,13 @@ def _handle_widget_query(query):
     user = query.get("from", {})
     if str(user.get("id")) not in ALLOWED:
         return
-    if query.get("type") not in (None, "data"):
+    # WidgetQuery.type is a WidgetQueryType OBJECT, e.g. {"type": "data"},
+    # not a plain string (Bot API 10.4). Only data queries carry a tap
+    # command; wallet queries (sign_data / sent_transaction) are ignored.
+    qtype = query.get("type") or {}
+    if isinstance(qtype, dict):
+        qtype = qtype.get("type")
+    if qtype not in (None, "data"):
         return
     data = query.get("data") or ""
     cmd = WIDGET_COMMANDS.get(data)
