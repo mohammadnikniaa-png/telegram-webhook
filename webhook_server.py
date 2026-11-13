@@ -43,6 +43,83 @@ ALLOWED = set(x.strip() for x in ENV.get("ALLOWED_USER_IDS", "72551872").split("
 BALE_TOKEN = ENV.get("BALE_BOT_TOKEN", "")
 BALE_ALLOWED = set(x.strip() for x in ENV.get("BALE_ALLOWED_USER_IDS", "63920689").split(",") if x.strip())
 
+# --- Quick-action widget (Telegram Bot API 10.4, Telegram-only; Bale untouched) ---
+# One small HTML widget with three buttons: check / statement / status.
+# A tap arrives as a widget_query update; it is turned into an inbox item
+# with the matching command text, so the main agent answers it exactly like
+# a typed message. The widget is sent via the outbox with kind="widget".
+WIDGET_COMMANDS = {"check": "چک کن", "statement": "صورتحساب بگیر", "status": "وضعیت سیستم"}
+WIDGET_CAPTION = "دکمه‌های سریع — بزن تا دستور برسه: چک کن، صورتحساب بگیر، وضعیت سیستم"
+
+def _load_widget_html():
+    try:
+        with open(os.path.join(BASE, "quick_actions_widget.html"), encoding="utf-8") as f:
+            html = f.read()
+        import zlib
+        raw = len(html.encode("utf-8"))
+        comp = len(zlib.compress(html.encode("utf-8"), 9))
+        if raw > 32768 or comp > 4096:
+            print(f"widget html too large: raw={raw} compressed={comp}", flush=True)
+            return ""
+        return html
+    except FileNotFoundError:
+        return ""
+
+WIDGET_HTML = _load_widget_html()
+
+def _tg_call(method, params):
+    if not TOKEN:
+        return {"ok": False, "description": "no token"}
+    data = json.dumps(params).encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/{method}",
+        data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        print(f"telegram {method} error:", e, flush=True)
+        return {"ok": False, "description": str(e)}
+
+def send_widget(chat_id):
+    """Send the quick-action widget to a private Telegram chat."""
+    if not TOKEN or not WIDGET_HTML:
+        return {"ok": False, "description": "widget unavailable"}
+    return _tg_call("sendWidget", {
+        "chat_id": chat_id,
+        "html": WIDGET_HTML,
+        "chat_data": json.dumps({"last": None}, ensure_ascii=False),
+        "allow_queries": True,
+        "caption": WIDGET_CAPTION,
+    })
+
+def _handle_widget_query(query):
+    """Turn a widget tap into an inbox command, then ack the widget."""
+    user = query.get("from", {})
+    if str(user.get("id")) not in ALLOWED:
+        return
+    if query.get("type") not in (None, "data"):
+        return
+    data = query.get("data") or ""
+    cmd = WIDGET_COMMANDS.get(data)
+    if not cmd:
+        # Unknown/untrusted tap data: still ack so the widget does not hang.
+        _tg_call("answerWidgetQuery", {"widget_query_id": query.get("id"),
+                                       "data": json.dumps({"ok": False}, ensure_ascii=False)})
+        return
+    chat = query.get("chat", {})
+    chat_id = chat.get("id")
+    with open(INBOX, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"platform": "telegram", "chat_id": chat_id,
+            "user_id": user.get("id"), "text": cmd, "via": "widget",
+            "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
+    # Ack first (15s window), then update the widget state (best effort).
+    _tg_call("answerWidgetQuery", {"widget_query_id": query.get("id"),
+        "data": json.dumps({"ok": True, "cmd": cmd}, ensure_ascii=False)})
+    _tg_call("editMessageWidgetData", {"chat_id": chat_id,
+        "message_id": query.get("message_id"),
+        "chat_data": json.dumps({"last": cmd, "at": time.strftime("%H:%M")}, ensure_ascii=False)})
+    flush_outbox()
+
 def send_message(chat_id, text):
     if not TOKEN:
         return
@@ -74,6 +151,8 @@ def flush_outbox():
         item = json.loads(line)
         if item.get("platform") == "bale":
             send_message_bale(item["chat_id"], item["text"])
+        elif item.get("kind") == "widget":
+            send_widget(item["chat_id"])
         else:
             send_message(item["chat_id"], item["text"])
 
@@ -143,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         if OBSCURE_PATH and self.path == f"/outbox-{OBSCURE_PATH}":
             try:
                 item = json.loads(body)
-                if item.get("chat_id") and item.get("text"):
+                if item.get("chat_id") and (item.get("text") or item.get("kind") == "widget"):
                     with open(OUTBOX, "a", encoding="utf-8") as f:
                         f.write(json.dumps(item, ensure_ascii=False) + "\n")
                     flush_outbox()
@@ -156,7 +235,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(403); self.end_headers(); return
             try:
                 item = json.loads(body)
-                if item.get("chat_id") and item.get("text"):
+                if item.get("chat_id") and (item.get("text") or item.get("kind") == "widget"):
                     with open(OUTBOX, "a", encoding="utf-8") as f:
                         f.write(json.dumps(item, ensure_ascii=False) + "\n")
                     flush_outbox()
@@ -176,6 +255,9 @@ class Handler(BaseHTTPRequestHandler):
                         "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
                 send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
                 flush_outbox()
+            wq = update.get("widget_query")
+            if wq:
+                _handle_widget_query(wq)
         except Exception as e:
             print("webhook error:", e, flush=True)
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
@@ -207,6 +289,9 @@ def _poll_loop():
                                 "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
                         send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
                         flush_outbox()
+                    wq = update.get("widget_query")
+                    if wq:
+                        _handle_widget_query(wq)
         except Exception as e:
             print("poll error:", e, flush=True)
         time.sleep(2)
