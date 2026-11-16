@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>دکمه‌های سریع</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:sans-serif;direction:rtl;text-align:center;padding:14px 12px;
+background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#222)}
+h3{margin:6px 0 4px;font-size:17px}
+p.sub{margin:0 0 12px;font-size:13px;color:var(--tg-theme-hint-color,#888)}
+button{display:block;width:100%;margin:9px 0;padding:15px 10px;font-size:16px;font-weight:bold;
+border:0;border-radius:12px;cursor:pointer;
+background:var(--tg-theme-button-color,#2aabee);color:var(--tg-theme-button-text-color,#fff)}
+button:active{opacity:.75}
+button:disabled{opacity:.55}
+#m{font-size:13px;color:var(--tg-theme-hint-color,#888);min-height:18px;margin-top:8px}
+</style>
+</head>
+<body>
+<h3>⚡ دکمه‌های سریع</h3>
+<p class="sub">بزن تا دستور به ربات برسه</p>
+<button data-c="چک کن">🔍 چک کن</button>
+<button data-c="صورتحساب بگیر">🧾 صورتحساب بگیر</button>
+<button data-c="وضعیت سیستم">📡 وضعیت سیستم</button>
+<button data-c="تراکنش از گوشی">📱 تراکنش از گوشی</button>
+<button data-c="تراکنش از واتساپ">💬 تراکنش از واتساپ</button>
+<div id="m">&nbsp;</div>
+<script>
+var WA = window.Telegram && window.Telegram.WebApp;
+function say(t){document.getElementById('m').textContent = t || ' ';}
+if (WA) {
+  try { WA.ready(); WA.expand(); } catch(e) {}
+  document.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click', function(){
+      b.disabled = true;
+      say('در حال ارسال…');
+      try {
+        WA.sendData(b.dataset.c);
+        say('فرستاده شد ✓');
+        setTimeout(function(){ try { WA.close(); } catch(e) {} }, 600);
+      } catch(e) {
+        say('نشد، دوباره بزن');
+        b.disabled = false;
+      }
+    });
+  });
+} else {
+  say('این صفحه فقط داخل تلگرام باز می‌شود');
+  document.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+}
+</script>
+</body>
+</html>

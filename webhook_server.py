@@ -43,6 +43,55 @@ ALLOWED = set(x.strip() for x in ENV.get("ALLOWED_USER_IDS", "72551872").split("
 BALE_TOKEN = ENV.get("BALE_BOT_TOKEN", "")
 BALE_ALLOWED = set(x.strip() for x in ENV.get("BALE_ALLOWED_USER_IDS", "63920689").split(",") if x.strip())
 
+# --- Telegram Mini App for the same quick-action buttons ---
+# A small web app (miniapp.html) with the same 5 buttons as the reply
+# keyboard. It is opened from an inline keyboard button with web_app, so a
+# tap can use Telegram.WebApp.sendData(command) — Telegram then delivers a
+# message with web_app_data to the bot, which is turned into an inbox item
+# exactly like a typed command (with "via": "miniapp"). Bale untouched.
+# Only the 5 known command texts are accepted; anything else is ignored.
+MINIAPP_COMMANDS = {"چک کن", "صورتحساب بگیر", "وضعیت سیستم",
+                    "تراکنش از گوشی", "تراکنش از واتساپ"}
+
+def _load_miniapp_html():
+    try:
+        with open(os.path.join(BASE, "miniapp.html"), encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+MINIAPP_HTML = _load_miniapp_html()
+# Public URL of the Mini App (same FadeHost app, /miniapp route).
+MINIAPP_URL = ENV.get("MINIAPP_URL", "https://telegram-webhook.fadehost.app/miniapp")
+
+def send_miniapp_button(chat_id):
+    """Send a message with an inline button that opens the Mini App.
+    Launched from a keyboard button, so sendData works inside the app."""
+    if not TOKEN or not MINIAPP_HTML:
+        return {"ok": False, "description": "miniapp unavailable"}
+    return _tg_call("sendMessage", {
+        "chat_id": chat_id,
+        "text": "دکمه‌های سریع — اپ رو باز کن 👇",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "📱 باز کردن دکمه‌های سریع", "web_app": {"url": MINIAPP_URL}}]]},
+    })
+
+def _handle_web_app_data(msg):
+    """Turn a Mini App sendData tap into an inbox command. Returns True
+    if it was a valid whitelisted command from the allowed user."""
+    user = msg.get("from", {})
+    if str(user.get("id")) not in ALLOWED:
+        return False
+    wad = msg.get("web_app_data") or {}
+    cmd = (wad.get("data") or "").strip()
+    if cmd not in MINIAPP_COMMANDS:
+        return False
+    with open(INBOX, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"platform": "telegram", "chat_id": msg["chat"]["id"],
+            "user_id": user.get("id"), "text": cmd, "via": "miniapp",
+            "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
+    return True
+
 # --- Quick-action widget (Telegram Bot API 10.4, Telegram-only; Bale untouched) ---
 # One small HTML widget with three buttons: check / statement / status.
 # A tap arrives as a widget_query update; it is turned into an inbox item
@@ -74,7 +123,7 @@ WIDGET_HTML = _load_widget_html()
 # message, which arrives in the inbox exactly like a typed command — no
 # intake change is needed. The keyboard is sent via the outbox with
 # kind="keyboard", or as a "keyboard" field alongside "text".
-QUICK_KEYBOARD = [["چک کن", "صورتحساب بگیر"], ["وضعیت سیستم", "تراکنش بفرست"]]
+QUICK_KEYBOARD = [["چک کن", "صورتحساب بگیر"], ["تراکنش از گوشی", "تراکنش از واتساپ"], ["وضعیت سیستم"]]
 KEYBOARD_TEXT = "دکمه‌های سریع 👇"
 
 def _keyboard_markup(rows):
@@ -95,10 +144,10 @@ def _keyboard_markup(rows):
 
 def _outbox_accept(item):
     """Accept an outbox item: it needs a chat_id and something to send
-    (text, a keyboard, or a widget/keyboard kind)."""
+    (text, a keyboard, or a widget/keyboard/miniapp kind)."""
     return bool(item.get("chat_id")) and bool(
         item.get("text") or item.get("keyboard")
-        or item.get("kind") in ("widget", "keyboard"))
+        or item.get("kind") in ("widget", "keyboard", "miniapp"))
 
 def _tg_call(method, params):
     if not TOKEN:
@@ -224,6 +273,8 @@ def flush_outbox():
             send_message_bale(item["chat_id"], item["text"])
         elif item.get("kind") == "widget":
             send_widget(item["chat_id"])
+        elif item.get("kind") == "miniapp":
+            send_miniapp_button(item["chat_id"])
         elif item.get("kind") == "keyboard":
             send_keyboard(item["chat_id"], rows=item.get("keyboard"),
                           text=item.get("text"))
@@ -244,6 +295,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+        if self.path == "/miniapp":
+            if not MINIAPP_HTML:
+                self.send_response(404); self.end_headers(); return
+            data = MINIAPP_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
         if self.path == "/pending":
             items = []
             if os.path.exists(INBOX):
@@ -332,6 +391,9 @@ class Handler(BaseHTTPRequestHandler):
                         "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
                 send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
                 flush_outbox()
+            if msg.get("web_app_data") and _handle_web_app_data(msg):
+                send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
+                flush_outbox()
             wq = update.get("widget_query")
             if wq:
                 _handle_widget_query(wq)
@@ -364,6 +426,9 @@ def _poll_loop():
                             f.write(json.dumps({"platform": "telegram", "chat_id": msg["chat"]["id"],
                                 "user_id": user.get("id"), "text": msg["text"],
                                 "inbox_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, ensure_ascii=False) + "\n")
+                        send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
+                        flush_outbox()
+                    if msg.get("web_app_data") and _handle_web_app_data(msg):
                         send_message(msg["chat"]["id"], "دریافت شد ✅ در صف پاسخ")
                         flush_outbox()
                     wq = update.get("widget_query")

@@ -22,6 +22,24 @@ private chat with the bot.
 Limits (Telegram): HTML ≤ 32,768 bytes raw, ≤ 4,096 bytes zlib-compressed.
 The server checks both at startup and disables the widget if it is too big.
 
+## Telegram Mini App for the same quick-action buttons
+
+A nicer UI than the reply keyboard: `miniapp.html` is a small web app with
+the same 5 buttons (چک کن، صورتحساب بگیر، وضعیت سیستم، تراکنش از گوشی،
+تراکنش از واتساپ). It is served by this server at `GET /miniapp` and opened
+from an inline keyboard button with `web_app`, so a tap uses
+`Telegram.WebApp.sendData(command)` — Telegram delivers a message with
+`web_app_data` to the bot, which is written to the inbox exactly like a
+typed command (with `"via": "miniapp"`). Only the 5 known command texts
+are accepted, and only from the whitelisted user; anything else is ignored.
+
+- Send the open-app button: POST to the outbox route
+  (`/outbox-<OBSCURE_PATH>` or `/outbox`) with
+  `{"platform": "telegram", "chat_id": 72551872, "kind": "miniapp"}`.
+- The reply keyboard stays as the always-visible fallback; the Mini App is
+  an extra, prettier way to send the same commands.
+- Bale is untouched: the Mini App is Telegram-only.
+
 ## Reply keyboard fallback (standard Telegram keyboards)
 
 The widget is currently blocked by Telegram: `sendWidget` returns HTTP 400
